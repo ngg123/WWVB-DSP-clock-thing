@@ -1,0 +1,8 @@
+MSP Notes:
+
+Mar 12,2014
+ADC10:
+SHSx bits control the ADC trigger source.  SHS=1,2,3 source the trigger from the Timer_A peripheral.  Specifically, the trigger source comes from OUTx signal from the CCRx output modulator.  In other words, the CCRx unit must be configured in compare mode, *AND* the output unit must be set to generate edges when the compare value is reached, *AND* the ADC10 SHSy bits must be set to source trigger from the CCRx unit. Note that x != y.  
+
+TimerA:
+Accepting the CCR0 interrupt automatically resets the TA_CCIFG0 bit, since it has it's own interrupt vector.  However, the other TA_CCIFGx bits and the TAIFG bit are not reset automatically unless the TAIV register is read.  

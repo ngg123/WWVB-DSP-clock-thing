@@ -1,0 +1,53 @@
+DMA setup (before ADC is active)
+ADC10DTC = ADC10TB | ADC10CT; // set 2-block mode, continuous transfer
+ADC10DTC1 = 8; // size of DTC block (remember to allocate memory for 2 of these)
+ADC10SA = ADC_BUFFER; // pointer to first element of adc buffer
+
+
+
+timerA_1 vector
+/* 
+  This ISR as written should execute in 11 (Interrupt overhead) + 8 = 19 
+cycles using no registers, or 11 + 6 = 17 cycles if the timer_rate and TAIV 
+pointer are always held in registers.  For the WWVB receiver, we need to 
+handle interrupts at a rate of 2*4*60kHz = 580kHz. At the datasheet-maximum 
+CPU speed of 16MHz, this gives us less than 33 cycles per interrupt.
+  Note that the DMA controller built into the ADC also requires 3 cycles to
+transfer each conversion result to RAM (and there will be one conversion per 
+CCR1 interrupt).
+*/
+
+/*
+   Increment the CCR1 register to generate the next CCR1 interrupt and
+toggle the analog->digital converter sample trigger input.
+*/
+
+CCR1 += timer_rate; // 5 cycles (4 if timer_rate is kept in a register)
+
+/*
+  This probably looks weird, but the MSP430 can efficiently execute
+a switch by adding the argument to the PC.  Total cost is a constant
+2 instruction cycles to get to any case.  For single instruction
+cases like these, the cost through the switch is only 2 cycles if our
+compiler isn't completely dumb. One extra cycle if the argument pointer
+isn't in a register (eg, if it is addressed in absolute mode instead of 
+indirect mode--don't change this to "switch(TAIV){" without a good reason). 
+An extra 2 CPU cycles are required to JMP to the code for a case if the CPU must execute more than one instruction for that case.
+ 
+  Note that TAIV can only generate 0, 2, 4, and 10.  All other bits in
+the peripheral register are hard-wired to 0.  Case 4 is never seen
+on targets with only 2 CCR units in the TimerA peripheral, but it's
+here just in case the code gets recompiled on a different target.
+
+  The point of doing this is to spend as few cycles as possible
+to reset the interrupt flag.  Directly clearing the bit costs at least 4
+cycles, plus an extra 5 to push/pop an unused register because of
+GCC stupidness.  This switch statement always executes in 2 CPU cycles.
+*/
+
+switch (*TAIV_PTR) {
+	case 0:  __RETI; // no interrupt pending
+	case 2:  __RETI; // Cap/Compare 1 flag
+	case 4:  __RETI; // Cap/Compare 2 flag
+	case 10: __RETI; // Counter overflow flag
+}
