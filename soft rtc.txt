@@ -1,0 +1,148 @@
+
+#define	ONE_PER_SECOND	0x00
+#define	FOUR_PER_SECOND	0x01
+#define	SIXTY_FOUR_PER_SECOND 0x02
+#define FIVE_TWELVE_PER_SECOND 0x03
+
+void (*CCR_isr)(void);
+volatile unsigned int softRTC_subSecondCounter;
+volatile unsigned long softRTC_secondCounter;
+volatile unsigned char softRTC_seconds;
+volatile unsigned char softRTC_minutes;
+volatile unsigned char softRTC_hours;
+volatile unsigned char softRTC_days;
+volatile unsigned int softRTC_ccr_inc;
+int softRTC_calRate;
+unsigned int softRTC_baseRate;
+unsigned int softRTC_modulator;
+unsigned int softRTC_modulation;
+
+/*
+ This function sets up the WDT in interval mode for use as 
+ the softRTC timebase.  Four levels of granularity are supported:
+ osc/32768, /8192, /512, and /64. Using a regular 32kHz watch
+ crystal, this gives interrupts at a rate of 1Hz, 4Hz, 64Hz,
+ and 512Hz.  The user is given this granularity option to choose
+ the best trade-off between power usage (low rate) and clock
+ resolution (high rate).  
+
+ Note, the granularity parameter does not affect the long-term
+ accuracy of the clock!
+
+ Granularity only sets the maximum amount by which the clock may
+ be offset from the correct time before it corrects itself. In
+ other words, secondCounter nominally increments at a 1Hz rate,
+ and the value represents the current time.  The grandularity 
+ parameter sets the amount by which secondCounter maybe ahead of
+ the correct time before action is taken to reset it to the
+ correct time.  
+
+ For a granularity of x Hz, the secondCounter may be up to
+ (1/x) seconds head or behind the correct time.  Additionally,
+ the granulatity sets the amount of time that will be adjusted
+ when the correction happens (also 1/x seconds).  For example,
+ with granularity = 1 Hz and a fast crystal, secondCounter will
+ gradually drift ahead of real time until it transitions to
+ second n+2 just before the wall clock transitions to second n+1.
+ At that point, the modulator will correct the seconds counter
+ by stretching the n+2 second until the wall clock catches up. 
+ In other words, the secondCounter holds each value for nominally
+ 1 second, but in this example, the value n+2 would exist for almost
+ 2 seconds.
+
+ Conversely, if the crystal were slow, the secondCounter would
+ gradually drift behind the wall clock until it flipped from n to
+ n+1 just as the wall clock flipped from n+1 to n+2.  At this
+ point, the second counter would 'skip' a second, so it would
+ go directly from n to n+2. 
+
+ Obviously, a 1Hz granularity will be noticable is most applications,
+ but it is an extreme example.  For an alarm clock application,
+ the 4Hz granularity is probably unnoticable.
+*/
+
+void setupWDTrtc(int granularity){
+	/*
+	Set WDT to interval mode (interrupts not resets),
+	clear counter, set source to ext crystal, set granularity.
+	*/
+	CCR = &doNothing;
+	WDTCTL = WDTPW | WDTMSEL | WDTCNTCL | WDTSSEL | granularity;
+	softRTC_subSecondCounter = 0;
+	switch(granularity) {
+		case ONE_PER_SECOND:	softRTC_baseRate = 32768;
+					return;
+		case FOUR_PERSECOND: 	softRTC_baseRate = 8192;
+					return;
+		case SIXTY_FOUR_PER_SECOND: softRTC_baseRate = 512;
+					return;
+		case FIVE_TWELVE_PER_SECOND:softRTC_baseRate = 64;
+					return;
+		default:		softRTC_baseRate = 0;
+	}
+	
+}	
+
+void setupTA0rtc(int division, *int TABAR) {
+	
+}
+
+void setupTACCRrtc(int rate, *int TABAR){
+
+}
+
+
+long getLongSeconds(){
+	return softRTC_secondCounter;
+}
+
+void calRTC(){
+
+}
+
+void setRTC(long secondCounter){
+	__disable_WDT_int;
+	WDTCTL = WDTPW | WDTCNTCL;
+	softRTC_secondCounter = secondCounter;
+	__enable_WDT_int;
+}	
+
+void doNothing(void){
+
+}
+
+void CCR_isr(void){
+	*softRTC_ccr += softRTC_ccr_inc;
+}
+
+
+// This function is intended to be called from the WDT ISR
+void softRTC_ISR(void) {
+	int calRate;		
+	unsigned int newVal;
+	CCR_isr();
+	softRTC_modulator++;
+	if (softRTC_modulation == softRTC_modulator) {
+		softRTC_modulator = 0;
+		calRate = softRTC_calRate;
+	} else {
+		calRate = 0;
+	}
+
+	// Note: newVal, softRTC_subSecondCounter and softRTC_baseRate are all
+	// unsigned, but calRate is signed.  This is on purpose because
+	// cal rate might need to be negative.  The sum should never be
+	// negative because calRate is supposed to be a small correction
+	// to softRTC_baseRate
+	newVal = softRTC_subSecondCounter + softRTC_baseRate + calRate;
+	if (newVal < softRTC_subSecondCounter) { //this means we overflew the int
+		softRTC_secondCounter+=2;
+		// a - 65535 == a
+	} else if (newVal > (32768-1)) { //this means we overflew 15 bits
+		softRTC_secondCounter++;
+		newVal -=32768;
+	}	
+	softRTC_subSecondCounter = newVal;
+
+}
+
