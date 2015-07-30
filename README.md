@@ -17,5 +17,5 @@ A special service routine was written in in-line assembly for the Timer A periph
 
 Another benefit of running the timer like this is that the other one or two (chip dependent) capture-compare registers and timer-A overflow interrupt are free to be used for other lower-priority purposes.  For example, a pulse-per-second waveform could be generated for locking an NTP server or a PWM waveform could be generated for analog output (perhaps to steer an oscillator).  
 
-Some pins needed for the primary function of this project are shared with the hardware UART pins, so the file softUART-t2.c is an implementation of a softUART for use in this project.  It was successfully tested by jumpering its output to the Rx pin on the MSP Launchpad board.
+Some pins needed for the primary function of this project are shared with the hardware UART pins, so the file softUART-t2.c is an implementation of a softUART for use in this project.  It was successfully tested by jumpering its output to the Rx pin on the MSP Launchpad board.  The softUART uses the same time base as the main event loop, and is intended to run synchronously with it (i.e., one bit per n loops). This works ok because the main event loop is synchronized to WWVB.
 
