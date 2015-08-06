@@ -1,7 +1,5 @@
 /*
-Copyright (c) 2014 - ngg123
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+Copyright (c) 2014 - ngg123 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
@@ -16,14 +14,24 @@ Copyright (c) 2014 - ngg123
 
 #include <msp430.h> 
 #include <limits.h>
-#include "softUART.h"
+#include "softUART-t2.h"
+
+#define		CPU_DUTYCYCLE
 
 #define     RED_LED               BIT0
-#define     GRN_LED               BIT6
+#define     GRN_LED               ( BIT3)
 #define     LED_DIR               P1DIR
 #define     LED_OUT               P1OUT
-// A3 is the same pin as P3 on G series devices
-#define     WWVB_ANT_CHANNEL      3
+/*
+ The following analog inputs cannot be used on the LaunchPad:
+ A0 -- used for TA0CLK input (local CXO) (this is universal, not just with LP)
+ A1 -- probably can be used, but lots of 4.8 MHz noise
+ A2 -- unless RX jumper is removed, LP UART pulls this up to Vcc
+ A3 -- Switch 2 is pulled up by external resistor
+ A6 -- LED2 pulls this down to ground, also used by softUART
+ A7 -- used by softUART
+ */
+#define     WWVB_ANT_CHANNEL      4
 #define     INCH_WWVB             (INCH_1*WWVB_ANT_CHANNEL)
 
 // these are used to set the source of the SMClk
@@ -74,6 +82,7 @@ void initClocks(void) {
    */
   BCSCTL3 = LFXT1S_2 | XCAP_0; // LFXT = digital external clock, minimal capacitance
   BCSCTL2 = SELM_0 | DIVM_0 | WWVB_LO_DCO; // MCLK = DCO, no division, SMCLK = WWVB_LO
+
   /*
     DCO For one device (room temp, RSEL=15,MOD=0): 
     7 (0xE0)= 21.4 MHz
@@ -85,7 +94,7 @@ void initClocks(void) {
   
   BCSCTL1 = 13; // workaround for BCL12 errata in 430g2x31 (and most G series devs)
   BCSCTL1 = 15;
-  P2SEL = BIT6 | BIT7; // workaround for BCL14 errata in 430g2x31 
+  //P2SEL = BIT6 | BIT7; // workaround for BCL14 errata in 430g2x31 
   
 }
 
@@ -130,7 +139,7 @@ void initTimer(void){
 
   TACCTL0 = CM_0 | CCIS_2 | CCIE | OUTMOD_4; //set up compare mode
   TACCTL1 = CM_0 | CCIS_2 | OUTMOD_0;
-  TACTL = TASSEL_0 | MC_2 | TACLR ; //SMClock, continuous mode, clear TAR
+  TACTL = TASSEL_0 | MC_2 | TACLR ; //ext TACLK, continuous mode, clear TAR
   // initialize the TACCR's to 0
   TACCR0 = 0;
   TACCR1 = 0;
@@ -139,9 +148,9 @@ void initTimer(void){
     Port 1 pins by setting P1SEL bits (to select the CCR as source) and
     setting the port direction to out.  
   */
-  P1SEL |= BIT5 | BIT0;
-  P1DIR |= BIT5;
-  P1DIR &= ~BIT0;
+  P1SEL |= BIT0; // set TACLK for TA peripheral use
+  //P1DIR |= BIT5;  // set TA0.1 as output
+  P1DIR &= ~BIT0; // set TACLK as input
   
   // Initialize the timer_rate to something reasonable
   timer_rate = INITIAL_TIMER_RATE;
@@ -158,12 +167,16 @@ void initADC(void) {
     bits 0 through 7 correspond to the A0 through A7 mux inputs.  ADC10AE1 enables
     A12 through A15 on bits 4 through 7, but G-series targets don't implement these
     mux inputs.
+
+    For most targets, PxSEL and PxDIR are "don't cares" for selecting analog inputs.
+    PxREN will still turn on the internal weak pull up/down resistor, and PxOUT
+    still controls the polarity of the voltage applied to the resistor.
   */
-  ADC10AE0 = BIT3;//1 << WWVB_ANT_CHANNEL;
-  P1DIR &= ~BIT3;//~(1 << WWVB_ANT_CHANNEL);
-  P1OUT &= ~BIT3;
-  P1REN &= ~BIT3;//~(1<<WWVB_ANT_CHANNEL);
-   
+  ADC10AE0 = (1 << WWVB_ANT_CHANNEL);
+  P1OUT &= ~(1 << WWVB_ANT_CHANNEL);
+  P1REN &= ~(1 << WWVB_ANT_CHANNEL);
+
+  
   // We must disable the ADC before changing anything 
   ADC10CTL0 &= ~ENC;
 
@@ -231,6 +244,7 @@ int main(void) {
   int tms = 0; // ten millisecond counter
   int hms = 0; // hundred millisecond counter
   long longPhase[4] = {0,0,0,0};
+  
 
   /*
     These variables are used by the delta-sigma modulator.
@@ -252,24 +266,35 @@ int main(void) {
     than the clock phase noise. We can usually trim the DCO 
     to within about 30 ppm using this method, but the DCO
     wanders by around +/-150 ppm over a minute.
+
+    Remaining phase noise in the PPS signal after d-S 
+    modulation is around 400 ppb, pk-pk.
    */
   int sigma = 0;
-  
-
   int deltaCal = 29; // +25 for  +10 ppm offset
   int calRate = +16384 - deltaCal; // center is at 16384
   int icalRate = calRate - INT_MIN; // ~ -16384
-  //int delta = 0;
+
+
+
+  unsigned int  tx_buf;
+  unsigned char rx_buf;
+  int state;
+#ifndef   SOFTUART_INTERNAL_TX_TIMER
+  int tx_timer = 0;
+#endif
+
   // Stop the watchdog
   WDTCTL = WDTPW |  WDTHOLD;
   // enable output for pins connected to LEDs on Launchpad
-  P1DIR |= RED_LED + GRN_LED;
+  P1DIR |=  GRN_LED;
   // turn off LEDs
-  P1OUT &= ~(RED_LED +GRN_LED);
+  P1OUT &= ~(GRN_LED);
   // init the peripherals
   initClocks();	
   initADC();
   initTimer();
+
   // enable interrupts
   __bis_status_register(GIE);
   
@@ -277,7 +302,7 @@ int main(void) {
   /*
     This is the main loop in the program.  The loop sleeps on
     every iteration.  The CPU is restarted by the ADC10 ISR,
-    which fires every time a block of data has been acquired. 
+	which fires every time a block of data has been acquired. 
 
     The ADC runs on a strict timer from an external CXO, so 
     this loop runs on a fixed schedule (240 kHz / ADC_BLOCK_SIZE).
@@ -286,12 +311,41 @@ int main(void) {
     
   */
 
+  P1DIR |= BIT5;
+  initTX();
+  initRX(&state, &rx_buf);
+  tx_buf = startTX('h');
+
   while(1) {
-    // toggle the red led so the oscilloscope can see we've finished the main loop
-    P1OUT ^= RED_LED; 
     
+
+    state = doRX(state, &rx_buf);
+    if (10 == state){
+      if (0xFFFF == tx_buf){
+      // This isn't a good way to check for tx_complete, but it's good enough
+	  tx_buf = startTX(rx_buf);
+      }
+    }
+#ifndef   SOFTUART_INTERNAL_TX_TIMER
+	tx_timer++;
+    if (3 == tx_timer){
+      tx_timer =0;
+#endif
+      tx_buf = doTXbit(tx_buf);
+#ifndef   SOFTUART_INTERNAL_TX_TIMER
+      }
+#endif
+
+
+#ifdef CPU_DUTYCYCLE
+    P1OUT ^= BIT5;
     // sleep until the ADC10 DTC finishes a block
     __bis_status_register(CPUOFF);
+    P1OUT |= BIT5;
+#else
+	__bis_status_register(CPUOFF);
+#endif
+
     /*
       This is our PPS signal, and we want it as close to the CPU wakeup
       possible to avoid being delayed by interrupts.
@@ -320,14 +374,6 @@ int main(void) {
     }
     
 
-    // toggle the red led so the oscilloscope can see we're
-    // running the main loop
-    P1OUT |= RED_LED;
-    
-
-
-
-
     /*
       First we accumulate each buffer of ADC samples in a structure
       called phaseData (each element of the array represents on of the
@@ -350,6 +396,8 @@ int main(void) {
       }
     }
 
+    
+
     /*
       ADC10 data is 10 bits long, so we will overflow the phaseData 
       after adding 2^(16-10)=64 samples to each phase.  Since each
@@ -370,8 +418,6 @@ int main(void) {
       tms++;
       hms++;
     }
-    
-
 
     /*
       This is the heart of the Costas Loop.  The basic idea here is the
@@ -388,23 +434,27 @@ int main(void) {
     
 
     if (99 == hms){
-      hms = 0;
+      
       long dPhase;
       // First check if the in-phase leg is pos or neg
       if (longPhase[1] > longPhase[3]){
 	dPhase = longPhase[0] - longPhase[2];
+	
       } else {
 	dPhase = longPhase[2] - longPhase[0];
+	
       }
       /*
 	When the phase is positive, it means our LO slipped backward a
 	little and we are sampling the reference too late.
        */
       if (dPhase > 0){
+	
 	// In here we should do something to speed up the LO
 	
       } else {
 	// In here we should do somethign to slow down the LO
+	
       }
 
       for (i=0;i<4;i++){
@@ -412,12 +462,17 @@ int main(void) {
       }
 
     } 
-
+    if (100 == hms) {
+      hms = 0;
+      
+    }
 
 
 
   }
 }
+
+
 
 /* The TimerA ISRs need to be written in assembler because gcc is too brain damaged
    to do the obvious thing when presented with something like A += B (and it also
@@ -439,19 +494,55 @@ timerA0_isr(void) {
 
 }
 
-__attribute__ ((__naked__,__interrupt__(TIMERA1_VECTOR))) static void
+
+/*
+  	The TAIV has the lsb hard-wired to 0 because it is intended to be directly added to
+  	the PC in a 3-cycle instruction.  The next instruction executed would be the one that 
+  	is located 1, 2, or 5 words ahead of the "add &TAIV, PC" instruction, which is
+  	intended to be an unconditional jump (2 cycles) to the real code.  Note that no
+  	registers are used (and thus none need be pushed) using this method. Reading TAIV also
+  	clears the interrupt flag (which is a Good Thing). 
+
+	timerA1_isr implements the 5-cycle branch in the above paragraph
+	TACCR1_isr is the real ISR for the CCR1 interrupt source
+	TACCR2_isr is the real ISR for the CCR2 interrupt source
+	TAOF_isr is the real ISR for the TA overflow interrupt source
+
+*/
+__attribute__ ((__naked__)) static void
+TACCR1_isr(void) {
+	asm("mov r6, %0":"=m" (TACCR1)); //TACCR1 = softCCR
+  	asm("add r5, r6");	//softCCR += ccrRate
+	asm("reti");
+}
+
+
+__attribute__ ((__naked__)) static void
+TACCR2_isr(void) {
+	asm("reti");  // do nothing -- TA2 devices can't get here
+}
+
+__attribute__ ((__naked__)) static void
+TAOF_isr(void){
+	asm("reti"); // do nothing -- TA overflows are expected and normal
+}
+
+__attribute__ ((__interrupt__(TIMERA1_VECTOR))) static void
 timerA1_isr(void) {
-  asm("mov r6, %0":"=m" (TACCR1)); //TACCR1 = softCCR
-  asm("add r5, r6"); // softCCR += timer_rate;
-  asm("add %0,r0"::"m" (TAIV)); // jump to TAIV by adding it to the PC
-  // (Reading TAIV is the fastest way to clear the A1 vector flags)
-  // These reti's handle all the physically possible values of TAIV
-  // (all other bits hard-wired to 0's)
-  asm("reti"); // CCR1 flag
-  asm("reti"); // CCR2 flag
-  asm("reti"); // reserved flag
-  asm("reti"); // reserved flag
-  asm("reti"); // Timer overflow
+  /*
+  TAIV is set according to which source generated the interrupt (CCR1, CCR2, or
+  TA overflow).  Adding TAIV to the PC (r0) causes the CPU to branch 1,2, or 5 words
+  forward, so the following 5 instructions must do meaningful things in the interrupt
+  context (it is best that they are either "reti" or unconditional branches, which are
+  both single-word instructions).
+  */
+  asm("add %0,r0"::"m" (TAIV)); 
+  asm("BR %0"::"" (&TACCR1_isr)); // goto CCR1 interrupt handler
+  asm("BR %0"::"" (&TACCR2_isr)); // goto CCR2 interrupt handler
+  asm("reti"); // reserved flag -- should never be generated
+  asm("reti"); // reserved flag -- should never be generated
+  asm("BR %0"::"" (&TAOF_isr)); // goto timer overflow handler
+
 }
 
 
